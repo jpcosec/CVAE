@@ -152,7 +152,7 @@ class DataManager(object):
 
         for index in indices: #probar triplet
             # se encuentra ejemplo positivo ventana dentro de iou primero
-            while ():
+            while (False):
                 while (True):
                     x = self.xposs[index] / self.stride[0] + np.random.random_integers(-self.nmid[0], high=self.nmid[0])
                     y = self.yposs[index] / self.stride[0] + np.random.random_integers(-self.nmid[1], high=self.nmid[1])
@@ -172,6 +172,9 @@ class DataManager(object):
                     if abs(self.xposs[negid] - self.xposs[index]) > margin * self.img_features_shape[0]:
                         if abs(self.yposs[negid] - self.yposs[index]) > margin * self.img_features_shape[1]:
                             break
+
+                if self.valid_triplet(self.data[index], self.data[posid], self.data[negid]):
+                    break
 
             index_array.append((posid, negid))
 
