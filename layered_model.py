@@ -1,50 +1,79 @@
 import numpy as np
 import tensorflow as tf
 
+
 from model_utils import z_layer
 
 
-# todo GENERAL- Dejar como VAE, probar con CIFAR, Usar en otro documento
-# todo dar forma facil de obtener embeddings
+# Sacar funciones de modelo de modelo en si, meter herencia donde sea necesario
+#todo evaluar si integrar capas de modelo antes (preprocesamiento VGG)
+#todo evaluar si procesar la imagen completa aca
+#todo ajuste de learning rate en optimizacion
+#todo ajuste de margen dinamico (base = 0.2)
+#todo probar perdidas con print de perdida total
+#todo Documentar
 
-
-# todo sacar el muestreo Z a una funcion externa (o modulo)
 class CVAE(object):
     """ Based on Beta Variational Auto Encoder, V1 """
 
     # Variacional
-    def __init__(self,  # todo agregar winsize, stride,
+    def __init__(self,
                  im_size,
                  gamma=0,  # Peso de z encoding
                  capacity_limit=25.0,  # limite de capacidad
-                 capacity_change_duration=100000,
+                 capacity_change_duration=1000,
                  learning_rate=5e-4,  # achicar a 16,16
                  winsize=(16, 16),
                  in_channel=128,
-                 triplet_gain=0.6):  # peso de triplett
+                 triplet_gain=100,  # peso de triplett
+                 VAE_gain = 0.5,
+                 margin=0.2,
+                 img_show=False): # Avisa si mostrar o no imagenes cargadas
 
+        # Optionals
+        self.img_show = img_show
+
+        # Check options
         self.winsize = winsize
         self.in_channel = in_channel
         self.flat_size = self.winsize[0] * self.winsize[1] * self.in_channel
-        self.batch_shape = [-1, self.winsize[0], self.winsize[1], self.in_channel]
-
-        # Cosas que van a servir
         self.win_area = self.winsize[0] * self.winsize[1]
         self.im_size = im_size
         self.im_diag = (self.im_size[0] * self.im_size[0]) + (self.im_size[1] * self.im_size[1])
 
-        self.gamma = gamma
-        self.capacity_limit = capacity_limit
-        self.capacity_change_duration = capacity_change_duration
-        self.learning_rate = learning_rate
 
+        # --------------
         # Create siamese autoencoder
+        # --------------
+        self.gamma = gamma
+        self.margin = margin # Margen de triplet loss
+
+        self.batch_shape = [-1, self.winsize[0], self.winsize[1], self.in_channel]
+
         self._create_siamese_network()
 
+        # --------------
         # Define loss function and corresponding optimizer
+        # --------------
+        # VAE
+        self.VAE_gain = VAE_gain
+        self.capacity_change_duration = capacity_change_duration
+        self.capacity_limit = capacity_limit
+
+        # Triplet
+        self.gain_change_duration = capacity_change_duration * 0.5
         self.triplet_gain = triplet_gain
+
+
+        # Learning
+        self.learning_rate = learning_rate
+
+        # Declare optimizer
         self._create_loss_optimizer()
 
+    """
+        Funciones de creacion de red
+    """
     # Crea red encoder parcial
     def _create_encoder_network(self, x, reuse=False):
         with tf.variable_scope("encoder", reuse=reuse) as scope:
@@ -52,20 +81,20 @@ class CVAE(object):
             # with tf.variable_scope("c1")
 
             x_reshaped = tf.reshape(x, self.batch_shape)  # [-1,16,16,3]
-            tf.summary.image('input', x_reshaped, 1)
+            if self.img_show:
+                tf.summary.image('input', x_reshaped, 1)
 
-            # todo crear iterativamente
             net = tf.layers.conv2d(x_reshaped,  # [-1,8,8,32]
-                                   filters=32,  # todo Variabilizar n_channels
-                                   kernel_size=(4, 4),  # todo_variabilizar canales
+                                   filters=32,# todo variabilizar porte de kernel y filtros
+                                   kernel_size=(4, 4),
                                    strides=(2, 2),
                                    activation=tf.nn.leaky_relu,
                                    padding="same",
                                    name="conv1")
 
             net = tf.layers.conv2d(net,  # [-1,4,4]
-                                   filters=32,  # todo Variabilizar n_channels
-                                   kernel_size=(4, 4),  # todo_variabilizar canales
+                                   filters=32,# todo aumentar numero de filtros a medida crece profundidad
+                                   kernel_size=(4, 4),
                                    strides=(2, 2),
                                    activation=tf.nn.leaky_relu,
                                    padding="same",
@@ -142,8 +171,8 @@ class CVAE(object):
                                              name="deconv4")"""
 
             x_out_logit = tf.reshape(net, [-1, self.flat_size])
-
-            tf.summary.image('output', net, 1)
+            if self.img_show:
+                tf.summary.image('output', net, 1)
 
             return x_out_logit
 
@@ -151,7 +180,7 @@ class CVAE(object):
     def _create_vae_network(self, x, capacity):
 
         with tf.variable_scope("B-Vae"):
-            encoder = self._create_encoder_network(x)  # todo Separar dentro de red siamesa
+            encoder = self._create_encoder_network(x)
 
             z = z_layer(encoder, 256, 32, name="Embedding", gamma=self.gamma)
             # z_sample = z._sample_z()
@@ -175,8 +204,7 @@ class CVAE(object):
             return net
 
     # Crea red siamesa completa
-    def _create_siamese_network(self):  # todo desacoplar perdida no vae
-
+    def _create_siamese_network(self):
         # Placeholders
         self.im = tf.placeholder(tf.float32, shape=[None, self.winsize[0] * self.winsize[1] * self.in_channel],
                                  name="input1")
@@ -195,8 +223,11 @@ class CVAE(object):
             self.posnet = self._create_vae_network(self.posim, self.c_pos)
             self.negnet = self._create_vae_network(self.negim, self.c_neg)
 
+    """
+        Funciones de implementacion de perdida
+    """
     # Crea perdida de diferencia
-    def _triplet_loss(self, margin):
+    def _triplet_loss(self, margin):# Usar IF para ver si pasar o no la perdida
         with tf.variable_scope("triplet_loss") as scope:
             # Se calcula distancia cuadratica
             d_pos = tf.reduce_sum(tf.square(self.anchornet['z_mean'] - self.posnet['z_mean']), 1)
@@ -228,6 +259,10 @@ class CVAE(object):
             c = self.capacity_limit * (step / self.capacity_change_duration)
         return c
 
+
+    """
+        Funciones para usar red
+    """
     # Entrenamiento de mini-batch, retorna perdida
     def partial_fit(self, sess, images, pos, neg, step):
         """Train model based on mini-batch of input data.
@@ -235,23 +270,27 @@ class CVAE(object):
         Return loss of mini-batch.
         """
         c = self._calc_encoding_capacity(step)
-        margin = 0.1
+
         _, reconstr_loss, latent_loss, zmean, triplet_loss, summary_str = sess.run((self.optimizer,  # outs
                                                                                     self.anchornet['rec_loss'],
                                                                                     self.anchornet['latent_loss'],
                                                                                     self.anchornet['z_mean'],
                                                                                     self.triplet_loss,
                                                                                     self.summary_op),
-                                                                                   feed_dict={  # ins todo agregar weas
+                                                                                   feed_dict={
                                                                                        self.im: images,
                                                                                        self.posim: pos,
                                                                                        self.negim: neg,
                                                                                        self.c_anchor: c,
                                                                                        self.c_pos: c,
                                                                                        self.c_neg: c,
-                                                                                       self.triplet_margin: margin
+                                                                                       self.triplet_margin: self.margin
                                                                                    })
         return reconstr_loss, latent_loss, zmean, triplet_loss, summary_str
+
+    # Funcion para obtener embedding sobre cortes
+    def embedding(self, sess, images):
+        return sess.run(self.anchornet['z_mean'], feed_dict={self.im: images})
 
 
 """

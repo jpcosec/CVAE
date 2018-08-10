@@ -1,12 +1,15 @@
 import tensorflow as tf
 import math
 from scipy import misc
+from scipy import io
 from scipy.stats import mode
 import numpy as np
 from Feature_Extractor import Feature_Extractor
+from scipy.spatial import distance
 
-# todo usar keras para preprocesar imagen
 
+# todo modificar para procesar varias imagenes
+# todo calcular campo receptivo de labels
 
 class DataManager(object):
     """" Reads a image and provides management"""
@@ -16,72 +19,97 @@ class DataManager(object):
                  window_size=(16, 16),
                  stride=(4, 4),
                  sprite_dir=None,
-                 gt_dir=None):
-
-        self.window_size = window_size
+                 gt_dir=None,
+                 format='mat'):
+        # -----------
+        # asignaciones externas
+        # -----------
         self.stride = stride
+        self.window_size = window_size
+
+        # -----------
+        # Inicializaciones vacias
+        # -----------
         self.data = []
         self.labels = []
         self.xposs = []
         self.yposs = []
         self.n_samples = 0
-        self.load(filename)
 
+        # -----------
+        # Definiciones internas
+        # -----------
+        self.nmid = (int(window_size[0] / (stride[0] * 2) - 1), int(window_size[1] / (stride[1] * 2) - 1))
+
+        # -----------
+        #   Ejecuciones
+        # ------------
+
+        # Crea labels
+        self.load_and_preprocess(filename)
+
+        # Crea labels para hacer test
         if gt_dir != None:
-            self.make_labels(gt_dir)
+            if format == 'mat':
+                self.make_labels_from_mat(gt_dir)
+            elif format == 'img':
+                self.make_labels_from_img(gt_dir)
+
+        # Crea sprites para embedding
         if sprite_dir != None:
             self.make_sprites(spritename=sprite_dir)
 
-        # Definiciones
-        self.nmid = (int(window_size[0] / (stride[0] * 2) - 1), int(window_size[1] / (stride[1] * 2) - 1))
 
+
+    # ---------
+    # propiedades
+    # ---------
     @property
     def sample_size(self):
         return self.n_samples
 
-    #   Loads images from folder using scypi and gets crops (way easier than TF method)
-
+    @property
     def get_im_size(self):
-        return self.image_shape[0], self.image_shape[1]
+        return self.img_features_shape[0], self.img_features_shape[1]
 
-    def load(self, filename):
+    # ---------
+    # Procesamiento de imagenes
+    # ---------
+    def load_and_preprocess(self, filename):
 
-        # todo Agregar data augmentations
-        # Loads image
-        #self.image = misc.imread(filename)
-        FE = Feature_Extractor([filename])
-        self.image= FE.fmaps[0][0,:,:,:]
-        # gets image shape
+        # todo Agregar data augmentations (Obstrucciones?, imagenes generadas con VGG)
+        # Loads img_features
+        # self.img_features = misc.imread(filename)
+        self.FE = Feature_Extractor(path_arr=[filename])  # todo modificar cuando se incorpore VGG directo a la red
+        self.img_features = self.FE.features[0][0, :, :, :]
+        self.image_shape =  self.FE.image_shape
+        self.image = self.FE.image
 
-        self.image_shape = self.image.shape
-        print(self.image_shape)
+        self.img_features_shape = self.img_features.shape
+        print(self.img_features_shape)
         # numero de ventanas
-        self.ywins = int(math.floor((self.image_shape[1] - self.window_size[1]) // self.stride[1]) + 1)
-        self.xwins = int(math.floor((self.image_shape[0] - self.window_size[0]) // self.stride[0]) + 1)
+        self.ywins = int(math.floor((self.img_features_shape[1] - self.window_size[1]) // self.stride[1]) + 1)
+        self.xwins = int(math.floor((self.img_features_shape[0] - self.window_size[0]) // self.stride[0]) + 1)
         # Gets crops
         self.get_crops()
 
-    # Retorna cortes de imagen y posicion x,y
-    def get_dataset(self):
-        # todo ver que pasa si se usa directamente la distancia en pixeles
-        return self.data, self.xposs, self.yposs
-
+    # Devuelve vector con detenciones de la imagen
     def taps(self, dim, windows, size, stride):
-        # todo ver si el nombre esta bien
+        # cambiar nombre
         # recorre la imagen anexando
         tap = []
         for i in np.arange(windows):
             x_1 = i * stride[dim]
             x_2 = (x_1) + size[dim]
 
-            if (x_2 > self.image_shape[dim]):
-                x_2 = self.image_shape[dim]
-                x_1 = self.image_shape[dim] - size[dim]
+            if (x_2 > self.img_features_shape[dim]):
+                x_2 = self.img_features_shape[dim]
+                x_1 = self.img_features_shape[dim] - size[dim]
             tap.append((x_1, x_2))
 
         return tap
 
-    # Crops a loaded image, the stride is adjusted for remainders
+    # Crops a loaded img_features, the stride is adjusted for remainders
     def get_crops(self):
         self.n_samples += self.xwins * self.ywins
 
@@ -91,54 +119,73 @@ class DataManager(object):
             xt = xtaps[i]
             for j in np.arange(self.ywins):
                 yt = ytaps[j]
-                self.data.append(self.image[xt[0]:xt[1], yt[0]:yt[1]])
+                self.data.append(self.img_features[xt[0]:xt[1], yt[0]:yt[1]])
                 self.xposs.append(xt[0])
                 self.yposs.append(yt[0])
 
+    # Avisa si la imagen esta dentro del rango
     def en_rango(self, x, y):
         if x > self.xwins or y > self.ywins or x < 0 or y < 0:
             return False
         else:
             return True
 
-    def rand_ids(self, indices, margin=0.1):
+    # Retorna booleano sobre si imagenes se parecen o no
+    def valid_triplet(self, anchor, pos, neg, umbral=0.1):
+
+        fx = anchor.flatten()
+        fy = pos.flatten()
+        fz = neg.flatten()
+
+        dist_pos = distance.euclidean(fy,fx)
+        dist_neg = distance.euclidean(fz,fx)
+
+        return dist_pos/dist_neg
+
+
+    # ---------
+    # Triplet batch
+    # ---------
+    # Genera indices aleatorios de tripletas
+    def rand_triplets(self, indices, margin=0.1):
         index_array = []
 
-        for index in indices:
+        for index in indices: #probar triplet
             # se encuentra ejemplo positivo ventana dentro de iou primero
-            while (True):
-                x = self.xposs[index] / self.stride[0] + np.random.random_integers(-self.nmid[0], high=self.nmid[0])
-                y = self.yposs[index] / self.stride[0] + np.random.random_integers(-self.nmid[1], high=self.nmid[1])
-                # print self.en_rango(x,y)
+            while ():
+                while (True):
+                    x = self.xposs[index] / self.stride[0] + np.random.random_integers(-self.nmid[0], high=self.nmid[0])
+                    y = self.yposs[index] / self.stride[0] + np.random.random_integers(-self.nmid[1], high=self.nmid[1])
+                    # print self.en_rango(x,y)
 
-                if self.en_rango(x, y):
-                    posid = int((self.xwins * x) + y)
-                    if posid < self.n_samples:
-                        break
+                    if self.en_rango(x, y):
+                        posid = int((self.xwins * x) + y)
+                        if posid < self.n_samples:
+                            break
 
-            # print ("posid",posid)
+                # print ("posid",posid)
 
-            # se encuentra ejemplo negativo fuera de iou despues
-            while (True):
-                negid = np.random.randint(self.n_samples)
-                # print ("negid",negid)
-                if abs(self.xposs[negid] - self.xposs[index]) > margin * self.image_shape[0]:
-                    if abs(self.yposs[negid] - self.yposs[index]) > margin * self.image_shape[1]:
-                        break
+                # se encuentra ejemplo negativo fuera de iou despues
+                while (True):
+                    negid = np.random.randint(self.n_samples)
+                    # print ("negid",negid)
+                    if abs(self.xposs[negid] - self.xposs[index]) > margin * self.img_features_shape[0]:
+                        if abs(self.yposs[negid] - self.yposs[index]) > margin * self.img_features_shape[1]:
+                            break
 
             index_array.append((posid, negid))
 
         return index_array
 
+    # Retorna batch de triplets
     def get_batch(self, indices, margin=0.1):
-
+        print("generando batch")
         images = []
         posimages = []
         negimages = []
 
-        indexes = self.rand_ids(indices, margin)
+        indexes = self.rand_triplets(indices, margin)
         # print ("indexes", indexes)
-
 
         for i in np.arange(len(indices)):
             index = indices[i]
@@ -162,24 +209,73 @@ class DataManager(object):
 
         return [images, posimages, negimages]
 
+    # ---------
+    # Labels
+    # ---------
+
+    # Retorna labels de indices
     def get_labels(self, indices):
         batch_labels = []
         for i in np.arange(len(indices)):
             batch_labels.append(self.labels[i])
         return batch_labels
 
-    # todo funcion para sacarse clases --- COMPLETAR URGNENTE
+    # Funcion para crear labels desde groundtruth en formato imagen
+    def make_labels_from_img(self, ground_truth_path):
+        """
+        Crea labels de celdas desde pixel-wise label map
+        :param ground_truth_path:
+        :return:
+        """
+        print('creando labels desde', ground_truth_path)
+        gt = misc.imread(ground_truth_path)
+
+        self.make_labels(gt)
+
+    # Funcion para crear labels desde groundtruth
+    def make_labels_from_mat(self, ground_truth_path):
+
+        """
+        S: The pixel-wise label map of size [height x width].
+        names: The names of the thing and stuff classes in COCO-Stuff. For more details see Label Names & Indices.
+        captions: Image captions from [2] that are annotated by 5 distinct humans on average.
+        regionMapStuff: A map of the same size as S that contains the indices for the approx. 1000 regions (superpixels) used to annotate the img_features.
+        regionLabelsStuff: A list of the stuff labels for each superpixel. The indices in regionMapStuff correspond to the entries in regionLabelsStuff.
+        """
+
+        mat = io.loadmat(ground_truth_path)
+        gt = mat["S"]
+
+        self.make_labels(gt)
+
+    # Funcion que calcula labels usando moda
     def make_labels(self, ground_truth):
-        print('creando labels desde', ground_truth)
-        gt = misc.imread(ground_truth)
-        self.labels = []
-        xtaps = self.taps(0, self.xwins, self.window_size, self.stride)
-        ytaps = self.taps(1, self.ywins, self.window_size, self.stride)
+        """
+        Procesa ground_truth ya cargado y retorna labels de celdas
+
+        :param ground_truth:
+        :return:
+        """
+
+        self.ground_truth = self.FE.zero_pad(ground_truth)
+        # Se realiza zero padding para "cuadrar" cortes
+
+        # se corrige el stride con aquel generado por la reduccion dimensional del preprocesamiento
+        prep_red = (
+        self.image_shape[0] / self.img_features_shape[0], self.image_shape[1] / self.img_features_shape[1])
+        stride = (self.stride[0] * prep_red[0], self.stride[1] * prep_red[1])
+        window_size=(self.window_size[0]*prep_red[0],self.window_size[1]*prep_red[1])
+
+        # Se obtienen detenciones
+        xtaps = self.taps(0, self.xwins, window_size, stride)
+        ytaps = self.taps(1, self.ywins, window_size, stride)
+
+        # Se obtienen labels usando moda
         for i in np.arange(self.xwins):
             xt = xtaps[i]
             for j in np.arange(self.ywins):
                 yt = ytaps[j]
-                window = gt[xt[0]:xt[1], yt[0]:yt[1]]
+                window = self.ground_truth[xt[0]:xt[1], yt[0]:yt[1]]
                 mod = mode(window.flatten())[0][0]
                 self.labels.append(mod)
 
@@ -206,8 +302,9 @@ class DataManager(object):
         misc.imsave(spritename, sprite_img)
         print("imagen guardada")
 
-    # todo Aleatorizar y entregar en batch con labels
+    """
     def get_images(self, indices):
+        print("img_4")
         # batchs pares
         images = []
 
@@ -216,11 +313,11 @@ class DataManager(object):
             img = img.reshape(-1)
             images.append(img)
         return images
-
-    """funcion para recibir cortes"""
+funcion para recibir cortes
 
     # retorna imagen llamada por indice
     def get_im_by_pos(self, x, y):
+        print("img_3")
 
         if x > self.xwins or y > self.ywins:
             print("fuera de rango")
@@ -230,6 +327,7 @@ class DataManager(object):
     # retorna tuplas de vecinos
     # todo deprecate
     def get_neighbour_tuples(self, x, y):
+        print("img_2")
         neighs = []
 
         # Control de borde
@@ -249,6 +347,7 @@ class DataManager(object):
 
     # retorna imagenes flattened desde el array pedido
     def get_neighbourhood(self, pos_arr):
+        print("img_1")
         boxes = []
         for pos in pos_arr:
             box = []
@@ -261,3 +360,14 @@ class DataManager(object):
         # def get_random_images(self, size):
         #    indices = [np.random.randint(self.n_samples) for i in range(size)]
         #    return self.data[indices]
+    # Retorna cortes de imagen y posicion x,y
+    def get_dataset(self):
+        print("img_13")
+        # todo ver que pasa si se usa directamente la distancia en pixeles
+        return self.data, self.xposs, self.yposs"""
+
+
+if __name__ == '__main__':
+    manager = DataManager(filename="test_IMG.jpg",
+                          gt_dir="test_segm.mat")
+

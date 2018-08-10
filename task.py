@@ -12,14 +12,14 @@ from img_manager import DataManager
 from layered_model import CVAE
 from tensorflow.contrib.tensorboard.plugins import projector
 
-
+#todo documentar
 # from tensorflow.contrib.training.python.training import hparam
 
 
 
 def train(sess,
           model,
-          manager,
+          triplet_manager,
           saver,
           make_embedding=False):
     summary_writer = tf.summary.FileWriter(flags.log_file, sess.graph)
@@ -33,11 +33,11 @@ def train(sess,
         embedding.sprite.single_image_dim.extend([16, 16])
         embedding.metadata_path = 'metadata.tsv'
 
-    n_samples = manager.sample_size
+    n_samples = triplet_manager.sample_size
 
-    print("Entrenando sobre %s samples", n_samples)
+    print("Entrenando sobre %s samples"% str(n_samples))
 
-    # reconstruct_check_images = manager.get_random_images(10)
+    # reconstruct_check_images = triplet_manager.get_random_images(10)
 
     indices = list(range(n_samples))
 
@@ -47,19 +47,17 @@ def train(sess,
 
     # Training cycle
     for epoch in range(flags.epoch_size):
-
-        # Shuffle image indices
+        # Shuffle img_features indices
         random.shuffle(indices)
 
         avg_cost = 0.0
 
         # Loop over all batches
         for i in range(total_batch):  # total_batch):
-            # print("nbatch")
-            # Generate image batch
-            # todo devolver
+
+            # Generate triplet img_features batch
             batch_indices = indices[flags.batch_size * i: flags.batch_size * (i + 1)]
-            [images, pos, neg] = manager.get_batch(batch_indices)
+            [images, pos, neg] = triplet_manager.get_batch(batch_indices)
 
             # Fit training using batch data
             reconstr_loss, latent_loss, zmean, triplet_loss, summary_str = model.partial_fit(sess, images, pos, neg,
@@ -76,7 +74,7 @@ def train(sess,
                         embedding.tensor_name = embedding_var.name
                         projector.visualize_embeddings(summary_writer, config)
 
-                        labels = manager.get_labels(batch_indices)
+                        labels = triplet_manager.get_labels(batch_indices)
                         with open('metadata.tsv', 'w') as f:
                             f.write("Index\tLabel\n")
                             for i in range(flags.batch_size):
@@ -94,14 +92,14 @@ def train(sess,
             # reconstruct_check(sess, model, reconstruct_check_images)
             # todo devolver estos 2
             # Disentangle check
-            # disentangle_check(sess, model, manager)
+            # disentangle_check(sess, model, triplet_manager)
             # Save checkpoint
         saver.save(sess, flags.checkpoint_dir + '/' + 'checkpoint', global_step=step)
 
 
 """
 def reconstruct_check(sess, model, images):
-    # Check image reconstruction
+    # Check img_features reconstruction
     x_reconstruct = model.reconstruct(sess, images)
 
     if not os.path.exists("reconstr_img"):
@@ -165,10 +163,8 @@ def map(sess,
     step = 0
     print("%s batches de %s" % (total_batch, flags.batch_size))
 
-    for i in range(n_samples):  # total_batch):
-        # print("nbatch")
-        # Generate image batch
-        # todo devolver
+    for i in range(n_samples):
+        # Generate img_features batch
         batch_indices = indices[flags.batch_size * i: flags.batch_size * (i + 1)]
         [images, pos, neg] = manager.get_batch(batch_indices)
 
@@ -208,7 +204,7 @@ def main_fn(flags):
                  capacity_limit=flags.capacity_limit,
                  capacity_change_duration=flags.capacity_change_duration,
                  learning_rate=flags.learning_rate,
-                 im_size=manager.get_im_size())
+                 im_size=manager.get_im_size)
 
     sess.run(tf.global_variables_initializer())
 
@@ -281,27 +277,31 @@ if __name__ == '__main__':
     )
     parser.add_argument(
         '--training',
-        help=' "training or not"',
+        help=' "True for training from data"',
         type=bool,
         default=True
     )
     parser.add_argument(
-        '--image_dir',
-        help=' "image direction"',
-        default="Datasets/cocostuff-10k-v1.1/images/COCO_train2014_000000003474.jpg"
+        '--embedding',
+        help=' True for embedding data',
+        type=bool
     )
-    parser.add_argument(  # todo - cambiar a None
-        # todo lee desde mat
-        # todo abrir en funcion de coco
+    #todo implementar estos dos ultimos desde el directorio
+    parser.add_argument(
+        '--image_dir',
+        help=' "img_features direction"',
+        default="test_IMG.jpg"
+    )
+    parser.add_argument(
         '--gt_dir',
         help=' Ground truth direction',
-        default="Datasets/cocostuff-10k-v1.1/annotations/COCO_train2014_000000003474.mat"
+        default="test_segm.mat"
     )
 
     parser.add_argument(
         '--mensaje',
         help=' "Mensaje"',
-        default="Abrio"
+        default="Experimentos TSEGMVAE"
     )
     flags = parser.parse_args()
     print(flags.mensaje)
